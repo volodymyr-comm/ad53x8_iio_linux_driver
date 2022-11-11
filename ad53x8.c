@@ -25,8 +25,7 @@
 
 #include "ad53x8.h"
 
-static int ad53x8_spi_write_val(struct spi_device *spi,
-                            u8 addr, u16 val, u8 shift)
+static int ad53x8_spi_write_val(struct spi_device *spi, u8 addr, u16 val, u8 shift)
 {
 	u16 msg;
 
@@ -36,44 +35,44 @@ static int ad53x8_spi_write_val(struct spi_device *spi,
 }
 
 static int ad53x8_spi_write_cmd(struct spi_device *spi,
-                            enum ad53x8_command_ids cmd,
-                            u8 chan, u8 val)
+				enum ad53x8_command_ids cmd,
+				u8 chan, u8 val)
 {
 	u16 msg = (1 << 15);
-    struct ad53x8_state *st = iio_priv(indio_dev);
+	struct ad53x8_state *st = iio_priv(indio_dev);
 
-    switch (cmd) {
-        case PDOWN:
-            // val = !(val == 0)
-            // u8 pwr_down_mask_new = ((st->pwr_down_mask & ~(1 << chan)) | (val << chan))
-            if (val)
-                st->pwr_down_mask |= (1 << chan->channel);
-            else
-                st->pwr_down_mask &= ~(1 << chan->channel);
-            msg = msg | (0b10 << 13) | (st->pwr_down_mask)
-            break;
+	switch (cmd) {
+		case PDOWN:
+			// val = !(val == 0)
+			// u8 pwr_down_buf_new = ((st->pwr_down_buf & ~(1 << chan)) | (val << chan))
+			if (val)
+				st->pwr_down_buf |= (1 << chan);
+			else
+				st->pwr_down_buf &= ~(1 << chan);
+			msg = msg | (0b10 << 13) | (st->pwr_down_buf);
+			break;
 
-        case LDAC:
-            val &= 0x11
-            msg = msg | (0b01 << 13) | val
-            break;
+		case LDAC:
+			val &= 0x11
+			msg = msg | (0b01 << 13) | val
+			break;
 
-        case GAIN:
-            break;
+		case GAIN:
+			break;
 
-        case BUF:
-            break;
+		case BUF:
+			break;
 
-        case VDD:
-            break;
-
-    }
-	msg = cpu_to_be((0 << 15) | (addr << 14) | (val << shift));
-
+		case VDD:
+			break;
+		case RESET:
+			msg = msg | (0b11 << 13) | (bool(val) << 12);
+			break;
+	}
 	return spi_write(spi, cpu_to_be16(msg), sizeof(msg));
 }
 
-static int ad53x8_read_raw(struct iio_dev *indio_dev,
+static int ad53x8_get_from_buf_raw(struct iio_dev *indio_dev,
 			   struct iio_chan_spec const *chan,
 			   int *val,
 			   int *val2,
@@ -83,18 +82,21 @@ static int ad53x8_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_SCALE:
-		*val = st->vref_mv;
-		*val2 = chan->scan_type.realbits;
-		return IIO_VAL_FRACTIONAL_LOG2;
+	\tscale_mv = ad5360_get_channel_vref(st, chan->channel);
+	\tif (scale_mv < 0)
+		\treturn scale_mv;
+	\t*val = scale_mv;
+	\t*val2 = chan->scan_type.realbits;
+	\treturn IIO_VAL_FRACTIONAL_LOG2;
 	}
 	return -EINVAL;
 }
 
 static int ad53x8_write_raw(struct iio_dev *indio_dev,
-			       struct iio_chan_spec const *chan,
-			       int val,
-			       int val2,
-			       long mask)
+				   struct iio_chan_spec const *chan,
+				   int val,
+				   int val2,
+				   long mask)
 {
 	struct ad53x8_state *st = iio_priv(indio_dev);
 
@@ -102,36 +104,16 @@ static int ad53x8_write_raw(struct iio_dev *indio_dev,
 	case IIO_CHAN_INFO_RAW:
 		if (val >= (1 << chan->scan_type.realbits) || val < 0)
 			return -EINVAL;
-        msg = cpu_to_be((0 << 15) | (chan->address << 14) | (val << scan_type.shift))
+		msg = cpu_to_be((0 << 15) | (chan->address << 14) | (val << scan_type.shift))
 
-        return spi_write(st->us, cpu_to_be16(msg), sizeof(msg))
+		return spi_write(st->us, cpu_to_be16(msg), sizeof(msg))
 
-    case IIO_CHAN_INFO_SCALE:
-        // todo
-
-	default:
-		return -EINVAL;
-	}
-}
-
-static int ad53x8_reset(struct iio_dev *indio_dev,
-			       struct iio_chan_spec const *chan,
-			       int val,
-			       int val2,
-			       long mask)
-{
-	struct ad53x8_state *st = iio_priv(indio_dev);
-
-	switch (mask) {
-	case IIO_CHAN_INFO_RAW:
-		if (val >= (1 << chan->scan_type.realbits) || val < 0)
+	// case IIO_CHAN_INFO_SCALE:
+	case IIO_CHAN_INFO_CALIBSCALE:
+		if (val >= 1 || val <= 2)
 			return -EINVAL;
-        msg = cpu_to_be((0 << 15) | (chan->address << 14) | (val << scan_type.shift))
 
-        return spi_write(st->us, cpu_to_be16(msg), sizeof(msg))
-
-    case IIO_CHAN_INFO_SCALE:
-        // todo
+		return ad53x8_spi_write_cmd(indio_dev, GAIN, chan->address, val);
 
 	default:
 		return -EINVAL;
@@ -144,12 +126,61 @@ static const char * const ad53x8_ldac_modes[] = {
 	"single_update" = AD53X8_LDAC_SINGLE_UPDATE
 };
 
-static int ad53x8_get_ldac(struct iio_dev *indio_dev,
+static const char * const ad53x8_gain_modes[] = {
+	"none" = 0,
+	"a-d" = 1,
+	"e-h" = 2,
+	"a-h" = 3,
+};
+
+static const char * const ad53x8_reset_modes[] = {
+	"data" = 0,
+	"data&control" = 1,
+};
+
+// static int ad53x8_get_ldac(struct iio_dev *indio_dev,
+// 	const struct iio_chan_spec *chan)
+// {
+// 	struct ad53x8_state *st = iio_priv(indio_dev);
+//
+// 	return st->ldac;
+// }
+
+static int ad53x8_set_ldac(struct iio_dev *indio_dev,
+	const struct iio_chan_spec *chan, unsigned int mode)
+{
+	struct ad53x8_state *st = iio_priv(indio_dev);
+
+	st->ldac = mode;
+
+	return 0;
+}
+
+static int ad53x8_reset(struct iio_dev *indio_dev,
+	const struct iio_chan_spec *chan, unsigned int mode)
+{
+	return ad53x8_spi_write_cmd(indio_dev, RESET, chan->address, val);
+
+	return 0;
+}
+
+
+static int ad53x8_get_gain(struct iio_dev *indio_dev,
 	const struct iio_chan_spec *chan)
 {
 	struct ad53x8_state *st = iio_priv(indio_dev);
 
-	return st->ldac;
+	return st->gain;
+}
+
+static int ad53x8_set_gain(struct iio_dev *indio_dev,
+	const struct iio_chan_spec *chan, unsigned int mode)
+{
+	struct ad53x8_state *st = iio_priv(indio_dev);
+
+	st->gain = mode;
+
+	return 0;
 }
 
 static int ad53x8_set_ldac(struct iio_dev *indio_dev,
@@ -162,11 +193,18 @@ static int ad53x8_set_ldac(struct iio_dev *indio_dev,
 	return 0;
 }
 
+
 static const struct iio_enum ad53x8_ldac_enum = {
 	.items = ad53x8_ldac_modes,
 	.num_items = ARRAY_SIZE(ad53x8_ldac_modes),
-	.get = ad53x8_get_ldac,
+	// .get = ad53x8_get_ldac,
 	.set = ad53x8_set_ldac,
+};
+
+static const struct iio_enum ad53x8_reset_enum = {
+	.items = ad53x8_reset_modes,
+	.num_items = ARRAY_SIZE(ad53x8_reset_modes),
+	.set = ad53x8_reset,
 };
 
 static ssize_t ad53x8_read_dac_powerdown(struct iio_dev *indio_dev,
@@ -175,7 +213,7 @@ static ssize_t ad53x8_read_dac_powerdown(struct iio_dev *indio_dev,
 	struct ad53x8_state *st = iio_priv(indio_dev);
 
 	return sysfs_emit(buf, "%d\n",
-			  !!(st->pwr_down_mask & (1 << chan->channel)));
+			  !!(st->pwr_down_buf & (1 << chan->channel)));
 }
 
 static ssize_t ad53x8_write_dac_powerdown(struct iio_dev *indio_dev,
@@ -194,9 +232,17 @@ static ssize_t ad53x8_write_dac_powerdown(struct iio_dev *indio_dev,
 	return ret ? ret : len;
 }
 
+static int ad53x8_get_channel_vref(struct ad5360_state *st,
+	unsigned int channel)
+{
+	unsigned int i = (channel < 5) ? 0 : 1;
+
+	return regulator_get_voltage(st->vref_reg[i].consumer);
+}
+
 static const struct iio_info ad53x8_info = {
 	.write_raw = ad53x8_write_raw,
-	.read_raw = ad53x8_read_raw,
+	.read_raw = ad53x8_get_from_buf_raw,
 };
 
 static const struct iio_chan_spec_ext_info ad53x8_ext_info[] = {
@@ -207,7 +253,11 @@ static const struct iio_chan_spec_ext_info ad53x8_ext_info[] = {
 		.shared = IIO_SEPARATE,
 	},
 	IIO_ENUM("ldac", IIO_SHARED_BY_TYPE, &ad53x8_ldac_enum),
-	IIO_ENUM_AVAILABLE("ldac", IIO_SHARED_BY_TYPE, &ad53x8_ldac_enum),
+	IIO_ENUM_AVAILABLE("ldac", IIO_SHARED_BY_TYPE, &ad53x8_ldac_enum)
+	IIO_ENUM("gain_2vref", IIO_SHARED_BY_TYPE, &ad53x8_gain_enum),
+	IIO_ENUM_AVAILABLE("gain_2vref", IIO_SHARED_BY_TYPE, &ad53x8_gain_enum),
+	IIO_ENUM("reset", IIO_SHARED_BY_TYPE, &ad53x8_reset_enum),
+	IIO_ENUM_AVAILABLE("reset", IIO_SHARED_BY_TYPE, &ad53x8_reset_enum)
 	{ },
 };
 
@@ -251,7 +301,7 @@ static const struct ad53x8_chip_info ad53x8_chip_info_tbl[] = {
 	[ID_AD5318] = {
 		.channels = ad5318_channels,
 	},
-    [ID_AD5328] = {
+	[ID_AD5328] = {
 		.channels = ad5328_channels,
 	},
 };
@@ -260,35 +310,45 @@ static int ad53x8_probe(struct spi_device *spi)
 {
 	struct ad53x8_state *st;
 	struct iio_dev *indio_dev;
-	int ret, voltage_uv = 0;
+	int ret = 0;
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
 	if (!indio_dev)
 		return -ENOMEM;
 	st = iio_priv(indio_dev);
-	st->reg = devm_regulator_get_optional(&spi->dev, "vref"); // todo get 2 vrefs
-	if (!IS_ERR(st->reg)) {
-		ret = regulator_enable(st->reg);
-		if (ret)
-			return ret;
+	// st->reg = devm_regulator_get_optional(&spi->dev, "vref"); // todo get 2 vrefs
+	// if (!IS_ERR(st->reg)) {
+	// 	ret = regulator_enable(st->reg);
+	// 	if (ret)
+	// 		return ret;
+ //
+	// 	ret = regulator_get_voltage(st->reg);
+	// 	if (ret < 0)
+	// 		goto error_disable_reg;
+ //
+	// 	st->vref1_mv = ret;
+	// } else {
+	// 	if (PTR_ERR(st->reg) != -ENODEV)
+	// 		return PTR_ERR(st->reg);
+	// }
 
-		ret = regulator_get_voltage(st->reg);
-		if (ret < 0)
-			goto error_disable_reg;
+	st->vref_reg[0].supply = "vref0_mv";
+	st->vref_reg[1].supply = "vref1_mv";
 
-		voltage_uv = ret;
-	} else {
-		if (PTR_ERR(st->reg) != -ENODEV)
-			return PTR_ERR(st->reg);
+	ret = devm_regulator_bulk_get(&st->spi->dev, 2, st->vref_reg);
+	if (ret) {
+		dev_err(&spi->dev, "Failed to request vref regulators: %d\n", ret);
+		goto error_free_channels;
+	}
+
+	ret = regulator_bulk_enable(2, st->vref_reg);
+	if (ret) {
+		dev_err(&spi->dev, "Failed to enable vref regulators: %d\n", ret);
+		goto error_free_channels;
 	}
 
 	spi_set_drvdata(spi, indio_dev);
 	st->chip_info = &ad53x8_chip_info_tbl[spi_get_device_id(spi)->driver_data];
-
-	if (voltage_uv)
-		st->vref1_mv = voltage_uv / 1000;
-	else
-		st->vref1_mv = st->chip_info->int_vref_mv;
 
 	st->us = spi;
 
@@ -308,9 +368,7 @@ static int ad53x8_probe(struct spi_device *spi)
 	return 0;
 
 error_disable_reg:
-	if (!IS_ERR(st->reg))
-		regulator_disable(st->reg);
-
+	regulator_bulk_disable(st->chip_info->num_vrefs, st->vref_reg);;
 	return ret;
 }
 
@@ -320,14 +378,13 @@ static void ad53x8_remove(struct spi_device *spi)
 	struct ad53x8_state *st = iio_priv(indio_dev);
 
 	iio_device_unregister(indio_dev);
-	if (!IS_ERR(st->reg))
-		regulator_disable(st->reg);
+	regulator_bulk_disable(st->chip_info->num_vrefs, st->vref_reg);
 }
 
 static const struct spi_device_id ad53x8_id[] = {
 	{"ad5308", ID_AD5308},
-    {"ad5318", ID_AD5318},
-    {"ad5328", ID_AD5328},
+	{"ad5318", ID_AD5318},
+	{"ad5328", ID_AD5328},
 	{}
 };
 MODULE_DEVICE_TABLE(spi, ad53x8_id);
